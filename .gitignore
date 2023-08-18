@@ -2,3 +2,5 @@ db.sqlite3
 env/
 .env.dev
 __pycache__
+.env.prod
+.env.prod.db
