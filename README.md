@@ -360,3 +360,168 @@ exec "$@"</pre>
 Instead, you can run them manually, after the containers spin up, like so:
 <pre>$ docker-compose exec web python manage.py flush --no-input
 $ docker-compose exec web python manage.py migrate</pre>
+
+# Gunicorn
+
+Moving along, for production environments, let's add [Gunicorn](https://gunicorn.org/), a production-grade WSGI server, to the requirements file:
+<pre>Django==4.2.3
+gunicorn==21.2.0
+psycopg2-binary==2.9.6</pre>
+| Curious about WSGI and Gunicorn? Review the [WSGI](https://testdriven.io/courses/python-web-framework/wsgi/) chapter from the [Building Your Own Python Web Framework](https://testdriven.io/courses/python-web-framework/) course.
+
+Since we still want to use Django's built-in server in development, create a new compose file called *docker-compose.prod.yml* for production:
+
+<pre>version: '3.8'
+
+services:
+  web:
+    build: ./app
+    command: gunicorn hello_django.wsgi:application --bind 0.0.0.0:8000
+    ports:
+      - 8000:8000
+    env_file:
+      - ./.env.prod
+    depends_on:
+      - db
+  db:
+    image: postgres:15
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    env_file:
+      - ./.env.prod.db
+
+volumes:
+  postgres_data:</pre>
+| If you have multiple environments, you may want to look at using a [docker-compose.override.yml](https://docs.docker.com/compose/extends/) configuration file. With this approach, you'd add your base config to a *docker-compose.yml* file and then use a *ocker-compose.override.yml* file to override those config settings based on the environment.
+
+Take note of the default `command`. We're running Gunicorn rather than the Django development server. We also removed the volume from the `web` service since we don't need it in production. Finally, we're using [separate environment variable files](https://docs.docker.com/compose/env-file/) to define environment variables for both services that will be passed to the container at runtime.
+
+*.env.prod:*
+<pre>POSTGRES_USER=hello_django
+POSTGRES_PASSWORD=hello_django
+POSTGRES_DB=hello_django_prod</pre>
+
+Add the two files to the project root. You'll probably want to keep them out of version control, so add them to a *.gitignore* file.
+
+Bring [down](https://docs.docker.com/compose/reference/down/) the development containers (and the associated volumes with the `-v` flag):
+<pre>$ docker-compose down -v</pre>
+Then, build the production images and spin up the containers:
+<pre>$ docker-compose -f docker-compose.prod.yml up -d --build</pre>
+Verify that the `hello_django_prod` database was created along with the default Django tables. Test out the admin page at http://localhost:8000/admin. The static files are not being loaded anymore. This is expected since Debug mode is off. We'll fix this shortly.
+
+| Again, if the container fails to start, check for errors in the logs via `docker-compose -f docker-compose.prod.yml logs -f`.
+# Production Dockerfile
+Did you notice that we're still running the database [flush](https://docs.djangoproject.com/en/4.2/ref/django-admin/#flush) (which clears out the database) and migrate commands every time the container is run? This is fine in development, but let's create a new entrypoint file for production.
+*entrypoint.prod.sh*:
+<pre>#!/bin/sh
+
+if [ "$DATABASE" = "postgres" ]
+then
+    echo "Waiting for postgres..."
+
+    while ! nc -z $SQL_HOST $SQL_PORT; do
+      sleep 0.1
+    done
+
+    echo "PostgreSQL started"
+fi
+
+exec "$@</pre>
+Update the file permissions locally:
+<pre>$ chmod +x app/entrypoint.prod.sh</pre>
+To use this file, create a new Dockerfile called Dockerfile.prod for use with production builds:
+<pre>###########
+# BUILDER #
+###########
+
+# pull official base image
+FROM python:3.11.4-slim-buster as builder
+
+# set work directory
+WORKDIR /usr/src/app
+
+# set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+
+# install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc
+
+# lint
+RUN pip install --upgrade pip
+RUN pip install flake8==6.0.0
+COPY . /usr/src/app/
+RUN flake8 --ignore=E501,F401 .
+
+# install python dependencies
+COPY ./requirements.txt .
+RUN pip wheel --no-cache-dir --no-deps --wheel-dir /usr/src/app/wheels -r requirements.txt
+
+
+#########
+# FINAL #
+#########
+
+# pull official base image
+FROM python:3.11.4-slim-buster
+
+# create directory for the app user
+RUN mkdir -p /home/app
+
+# create the app user
+RUN addgroup --system app && adduser --system --group app
+
+# create the appropriate directories
+ENV HOME=/home/app
+ENV APP_HOME=/home/app/web
+RUN mkdir $APP_HOME
+WORKDIR $APP_HOME
+
+# install dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends netcat
+COPY --from=builder /usr/src/app/wheels /wheels
+COPY --from=builder /usr/src/app/requirements.txt .
+RUN pip install --upgrade pip
+RUN pip install --no-cache /wheels/*
+
+# copy entrypoint.prod.sh
+COPY ./entrypoint.prod.sh .
+RUN sed -i 's/\r$//g'  $APP_HOME/entrypoint.prod.sh
+RUN chmod +x  $APP_HOME/entrypoint.prod.sh
+
+# copy project
+COPY . $APP_HOME
+
+# chown all the files to the app user
+RUN chown -R app:app $APP_HOME
+
+# change to the app user
+USER app
+
+# run entrypoint.prod.sh
+ENTRYPOINT ["/home/app/web/entrypoint.prod.sh"]</pre>
+Here, we used a Docker [multi-stage build](https://docs.docker.com/develop/develop-images/multistage-build/) to reduce the final image size. Essentially, `builder` is a temporary image that's used for building the Python wheels. The wheels are then copied over to the final production image and the `builder` image is discarded.
+
+| You could take the [multi-stage build approach](https://stackoverflow.com/a/53101932/1799408) a step further and use a single Dockerfile instead of creating two Dockerfiles. Think of the pros and cons of using this 
+approach over two different files.
+
+Did you notice that we created a non-root user? By default, Docker runs container processes as root inside of a container. This is a bad practice since attackers can gain root access to the Docker host if they manage to break out of the container. If you're root in the container, you'll be root on the host.
+
+Update the `web` service within the *docker-compose.prod.yml* file to build with *Dockerfile.prod*:
+<pre>web:
+  build:
+    context: ./app
+    dockerfile: Dockerfile.prod
+  command: gunicorn hello_django.wsgi:application --bind 0.0.0.0:8000
+  ports:
+    - 8000:8000
+  env_file:
+    - ./.env.prod
+  depends_on:
+    - db</pre>
+
+Try it out:
+<pre>$ docker-compose -f docker-compose.prod.yml down -v
+$ docker-compose -f docker-compose.prod.yml up -d --build
+$ docker-compose -f docker-compose.prod.yml exec web python manage.py migrate --noinput</pre>
