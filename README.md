@@ -167,3 +167,196 @@ Once the image is built, run the container:
 Navigate to http://localhost:8000/ to again view the welcome screen.
 
 | Check for errors in the logs if this doesn't work `via docker-compose logs -f`.
+
+# Postgres
+To configure Postgres, we'll need to add a new service to the *docker-compose.yml* file, update the Django settings, and install [Psycopg2](https://www.psycopg.org/).
+
+First, add a new service called `db` to *docker-compose.yml*:
+
+<pre>
+version: '3.8'
+
+services:
+  web:
+    build: ./app
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ./app/:/usr/src/app/
+    ports:
+      - 8000:8000
+    env_file:
+      - ./.env.dev
+    depends_on:
+      - db
+  db:
+    image: postgres:15
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      - POSTGRES_USER=hello_django
+      - POSTGRES_PASSWORD=hello_django
+      - POSTGRES_DB=hello_django_dev
+
+volumes:
+  postgres_data:
+</pre>
+To persist the data beyond the life of the container we configured a volume. This config will bind `postgres_data` to the "/var/lib/postgresql/data/" directory in the container.
+
+We also added an environment key to define a name for the default database and set a username and password.
+
+| Review the "Environment Variables" section of the [Postgres Docker Hub](https://hub.docker.com/_/postgres) page for more info.
+
+We'll need some new environment variables for the `web` service as well, so update *.env.dev* like so:
+<pre>
+DEBUG=1
+SECRET_KEY=foo
+DJANGO_ALLOWED_HOSTS=localhost 127.0.0.1 [::1]
+SQL_ENGINE=django.db.backends.postgresql
+SQL_DATABASE=hello_django_dev
+SQL_USER=hello_django
+SQL_PASSWORD=hello_django
+SQL_HOST=db
+SQL_PORT=5432
+</pre>
+
+Update the `DATABASES` dict in *settings.py*:
+<pre>
+DATABASES = {
+    "default": {
+        "ENGINE": os.environ.get("SQL_ENGINE", "django.db.backends.sqlite3"),
+        "NAME": os.environ.get("SQL_DATABASE", BASE_DIR / "db.sqlite3"),
+        "USER": os.environ.get("SQL_USER", "user"),
+        "PASSWORD": os.environ.get("SQL_PASSWORD", "password"),
+        "HOST": os.environ.get("SQL_HOST", "localhost"),
+        "PORT": os.environ.get("SQL_PORT", "5432"),
+    }
+}
+</pre>
+Here, the database is configured based on the environment variables that we just defined. Take note of the default values.
+
+Add Psycopg2 to *requirements.txt*:
+<pre>Django==4.2.3
+psycopg2-binary==2.9.6</pre>
+Build the new image and spin up the two containers:
+<pre>$ docker-compose up -d --build</pre>
+Run the migrations:
+<pre>$ docker-compose exec web python manage.py migrate --noinput</pre>
+
+| Get the following error?
+<pre>django.db.utils.OperationalError: FATAL:  database "hello_django_dev" does not exist</pre>
+| Run `docker-compose down -v` to remove the volumes along with the containers. Then, re-build the images, run the containers, and apply the migrations.
+You can check that the volume was created as well by running:
+<pre>$ docker volume inspect django-on-docker_postgres_data</pre>
+You should see something similar to:
+<pre>[
+    {
+        "CreatedAt": "2023-07-20T14:15:27Z",
+        "Driver": "local",
+        "Labels": {
+            "com.docker.compose.project": "django-on-docker",
+            "com.docker.compose.version": "2.19.1",
+            "com.docker.compose.volume": "postgres_data"
+        },
+        "Mountpoint": "/var/lib/docker/volumes/django-on-docker_postgres_data/_data",
+        "Name": "django-on-docker_postgres_data",
+        "Options": null,
+        "Scope": "local"
+    }
+]</pre>
+
+Next, add an *entrypoint.sh* file to the "app" directory to verify that Postgres is healthy *before* applying the migrations and running the Django development server:
+<pre>#!/bin/sh
+
+if [ "$DATABASE" = "postgres" ]
+then
+    echo "Waiting for postgres..."
+
+    while ! nc -z $SQL_HOST $SQL_PORT; do
+      sleep 0.1
+    done
+
+    echo "PostgreSQL started"
+fi
+
+python manage.py flush --no-input
+python manage.py migrate
+
+exec "$@"</pre>
+Update the file permissions locally:
+<pre>$ chmod +x app/entrypoint.sh</pre>
+Then, update the Dockerfile to copy over the *entrypoint.s*h file and run it as the Docker [entrypoint](https://docs.docker.com/engine/reference/builder/#entrypoint) command:
+<pre># pull official base image
+FROM python:3.11.4-slim-buster
+
+# set work directory
+WORKDIR /usr/src/app
+
+# set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+
+# install system dependencies
+RUN apt-get update && apt-get install -y netcat
+
+# install dependencies
+RUN pip install --upgrade pip
+COPY ./requirements.txt .
+RUN pip install -r requirements.txt
+
+# copy entrypoint.sh
+COPY ./entrypoint.sh .
+RUN sed -i 's/\r$//g' /usr/src/app/entrypoint.sh
+RUN chmod +x /usr/src/app/entrypoint.sh
+
+# copy project
+COPY . .
+
+# run entrypoint.sh
+ENTRYPOINT ["/usr/src/app/entrypoint.sh"]</pre>
+Add the `DATABASE` environment variable to *.env.dev*:
+<pre>DEBUG=1
+SECRET_KEY=foo
+DJANGO_ALLOWED_HOSTS=localhost 127.0.0.1 [::1]
+SQL_ENGINE=django.db.backends.postgresql
+SQL_DATABASE=hello_django_dev
+SQL_USER=hello_django
+SQL_PASSWORD=hello_django
+SQL_HOST=db
+SQL_PORT=5432
+DATABASE=postgres</pre>
+
+Test it out again:
+1. Re-build the images
+2. Run the containers
+3. Try http://localhost:8000/
+## Notes
+First, despite adding Postgres, we can still create an independent Docker image for Django as long as the `DATABASE` environment variable is not set to `postgres`. To test, build a new image and then run a new container:
+<pre>$ docker build -f ./app/Dockerfile -t hello_django:latest ./app
+$ docker run -d \
+    -p 8006:8000 \
+    -e "SECRET_KEY=please_change_me" -e "DEBUG=1" -e "DJANGO_ALLOWED_HOSTS=*" \
+    hello_django python /usr/src/app/manage.py runserver 0.0.0.0:8000</pre>
+    
+You should be able to view the welcome page at http://localhost:8006
+
+Second, you may want to comment out the database flush and migrate commands in the entrypoint.sh script so they don't run on every container start or re-start:
+<pre>#!/bin/sh
+
+if [ "$DATABASE" = "postgres" ]
+then
+    echo "Waiting for postgres..."
+
+    while ! nc -z $SQL_HOST $SQL_PORT; do
+      sleep 0.1
+    done
+
+    echo "PostgreSQL started"
+fi
+
+# python manage.py flush --no-input
+# python manage.py migrate
+
+exec "$@"</pre>
+Instead, you can run them manually, after the containers spin up, like so:
+<pre>$ docker-compose exec web python manage.py flush --no-input
+$ docker-compose exec web python manage.py migrate</pre>
