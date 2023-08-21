@@ -23,12 +23,14 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-j29ixpnn$r6d)e*_%ytax)gzcd6rn50y3@g*mh2e)(mg)l6k5e'
 
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['46.36.220.110']
+ALLOWED_HOSTS = ['t10.ee']
 
-CSRF_TRUSTED_ORIGINS = ["http://46.36.220.110:8080"]
+CSRF_TRUSTED_ORIGINS = ["https://t10.ee"]
 
 # Application definition
 
