@@ -28,11 +28,12 @@ SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['t10.ee']
+ALLOWED_HOSTS = ['t10.ee', '127.0.0.1', 'localhost']
 
-#CSRF_TRUSTED_ORIGINS = ["https://t10.ee"]
-CSRF_TRUSTED_ORIGINS = os.environ.get("CSRF_TRUSTED_ORIGINS").split(" ")
+CSRF_TRUSTED_ORIGINS = ["http://127.0.0.1/", "http://t10.ee"]
+#CSRF_TRUSTED_ORIGINS = os.environ.get("CSRF_TRUSTED_ORIGINS").split(" ")
 
+#APPEND_SLASH = True
 # Application definition
 
 INSTALLED_APPS = [
@@ -42,7 +43,8 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'upload',
+    'upload.apps.UploadConfig',
+    'mainApp.apps.MainappConfig',
 ]
 
 MIDDLEWARE = [
