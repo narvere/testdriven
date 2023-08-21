@@ -599,3 +599,316 @@ Bring the containers down once done:
 <pre>$ docker-compose -f docker-compose.prod.yml down -v</pre>
 
 Since Gunicorn is an application server, it will not serve up static files. So, how should both static and media files be handled in this particular configuration?
+
+# Static Files
+
+Update *settings.py*:
+<pre>STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"</pre>
+
+**Development**
+
+Now, any request to `http://localhost:8000/static/*` will be served from the "staticfiles" directory.
+
+**Production**
+
+For production, add a volume to the `web` and `nginx` services in docker-compose.prod.yml so that each container will share a directory named "staticfiles":
+<pre>version: '3.8'
+
+services:
+  web:
+    build:
+      context: ./app
+      dockerfile: Dockerfile.prod
+    command: gunicorn hello_django.wsgi:application --bind 0.0.0.0:8000
+    volumes:
+      - static_volume:/home/app/web/staticfiles
+    expose:
+      - 8000
+    env_file:
+      - ./.env.prod
+    depends_on:
+      - db
+  db:
+    image: postgres:15
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    env_file:
+      - ./.env.prod.db
+  nginx:
+    build: ./nginx
+    volumes:
+      - static_volume:/home/app/web/staticfiles
+    ports:
+      - 1337:80
+    depends_on:
+      - web
+
+volumes:
+  postgres_data:
+  static_volume:</pre>
+
+  We need to also create the "/home/app/web/staticfiles" folder in *Dockerfile.prod*:
+  <pre>...
+
+# create the appropriate directories
+ENV HOME=/home/app
+ENV APP_HOME=/home/app/web
+RUN mkdir $APP_HOME
+RUN mkdir $APP_HOME/staticfiles
+WORKDIR $APP_HOME
+
+...</pre>
+
+Why is this necessary?
+
+Docker Compose normally mounts named volumes as root. And since we're using a non-root user, we'll get a permission denied error when the `collectstatic` command is run if the directory does not already exist
+
+To get around this, you can either:
+
+Create the folder in the Dockerfile ([source](https://github.com/docker/compose/issues/3270#issuecomment-206214034))
+Change the permissions of the directory after it's mounted ([source](https://stackoverflow.com/a/40510068/1799408))
+
+We used the former.
+
+<pre>upstream hello_django {
+    server web:8000;
+}
+
+server {
+
+    listen 80;
+
+    location / {
+        proxy_pass http://hello_django;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Host $host;
+        proxy_redirect off;
+    }
+
+    location /static/ {
+        alias /home/app/web/staticfiles/;
+    }
+
+}</pre>
+Spin down the development containers:
+<pre>$ docker-compose down -v</pre>
+Test:
+<pre>$ docker-compose -f docker-compose.prod.yml up -d --build
+$ docker-compose -f docker-compose.prod.yml exec web python manage.py migrate --noinput
+$ docker-compose -f docker-compose.prod.yml exec web python manage.py collectstatic --no-input --clear</pre>
+Next, update the Nginx configuration to route static file requests to the "staticfiles" folder:
+
+Again, requests to `http://localhost:1337/static/*` will be served from the "staticfiles" directory.
+
+Navigate to http://localhost:1337/admin and ensure the static assets load correctly.
+
+You can also verify in the logs -- via `docker-compose -f docker-compose.prod.yml logs -f` -- that requests to the static files are served up successfully via Nginx:
+
+<pre>nginx_1  | 192.168.144.1 - - [23/Aug/2021:20:11:00 +0000] "GET /admin/ HTTP/1.1" 302 0 "-" "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36" "-"
+nginx_1  | 192.168.144.1 - - [23/Aug/2021:20:11:00 +0000] "GET /admin/login/?next=/admin/ HTTP/1.1" 200 2214 "-" "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36" "-"
+nginx_1  | 192.168.144.1 - - [23/Aug/2021:20:11:00 +0000] "GET /static/admin/css/base.css HTTP/1.1" 304 0 "http://localhost:1337/admin/login/?next=/admin/" "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36" "-"
+nginx_1  | 192.168.144.1 - - [23/Aug/2021:20:11:00 +0000] "GET /static/admin/css/nav_sidebar.css HTTP/1.1" 304 0 "http://localhost:1337/admin/login/?next=/admin/" "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36" "-"
+nginx_1  | 192.168.144.1 - - [23/Aug/2021:20:11:00 +0000] "GET /static/admin/css/responsive.css HTTP/1.1" 304 0 "http://localhost:1337/admin/login/?next=/admin/" "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36" "-"
+nginx_1  | 192.168.144.1 - - [23/Aug/2021:20:11:00 +0000] "GET /static/admin/css/login.css HTTP/1.1" 304 0 "http://localhost:1337/admin/login/?next=/admin/" "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36" "-"
+nginx_1  | 192.168.144.1 - - [23/Aug/2021:20:11:00 +0000] "GET /static/admin/js/nav_sidebar.js HTTP/1.1" 304 0 "http://localhost:1337/admin/login/?next=/admin/" "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36" "-"
+nginx_1  | 192.168.144.1 - - [23/Aug/2021:20:11:00 +0000] "GET /static/admin/css/fonts.css HTTP/1.1" 304 0 "http://localhost:1337/static/admin/css/base.css" "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36" "-"
+nginx_1  | 192.168.144.1 - - [23/Aug/2021:20:11:00 +0000] "GET /static/admin/fonts/Roboto-Regular-webfont.woff HTTP/1.1" 304 0 "http://localhost:1337/static/admin/css/fonts.css" "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36" "-"
+nginx_1  | 192.168.144.1 - - [23/Aug/2021:20:11:00 +0000] "GET /static/admin/fonts/Roboto-Light-webfont.woff HTTP/1.1" 304 0 "http://localhost:1337/static/admin/css/fonts.css" "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.159 Safari/537.36" "-"</pre>
+
+Bring the containers once done:
+
+<pre>docker-compose -f docker-compose.prod.yml down -v</pre>
+
+# Media Files
+To test out the handling of media files, start by creating a new Django app:
+
+<pre>$ docker-compose up -d --build
+$ docker-compose exec web python manage.py startapp upload</pre>
+
+Add the new app to the `INSTALLED_APPS` list in *settings.py*:
+
+<pre>INSTALLED_APPS = [
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
+
+    "upload",
+]</pre>
+
+*app/upload/views.py*:
+
+<pre>from django.shortcuts import render
+from django.core.files.storage import FileSystemStorage
+
+
+def image_upload(request):
+    if request.method == "POST" and request.FILES["image_file"]:
+        image_file = request.FILES["image_file"]
+        fs = FileSystemStorage()
+        filename = fs.save(image_file.name, image_file)
+        image_url = fs.url(filename)
+        print(image_url)
+        return render(request, "upload.html", {
+            "image_url": image_url
+        })
+    return render(request, "upload.html")</pre>
+
+    Add a "templates", directory to the "app/upload" directory, and then add a new template called *upload.html*:
+
+<pre>{% block content %}
+
+  <form action="{% url "upload" %}" method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+    <input type="file" name="image_file">
+    <input type="submit" value="submit" />
+  </form>
+
+  {% if image_url %}
+    <p>File uploaded at: <a href="{{ image_url }}">{{ image_url }}</a></p>
+  {% endif %}
+
+{% endblock %}</pre>
+
+*app/hello_django/urls.py*:
+<pre>from django.contrib import admin
+from django.urls import path
+from django.conf import settings
+from django.conf.urls.static import static
+
+from upload.views import image_upload
+
+urlpatterns = [
+    path("", image_upload, name="upload"),
+    path("admin/", admin.site.urls),
+]
+
+if bool(settings.DEBUG):
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)</pre>
+*app/hello_django/settings.py*:
+
+<pre>MEDIA_URL = "/media/"
+MEDIA_ROOT = BASE_DIR / "mediafiles"</pre>
+
+**Development**
+
+Test:
+
+<pre>$ docker-compose up -d --build</pre>
+
+You should be able to upload an image at http://localhost:8000/, and then view the image at http://localhost:8000/media/IMAGE_FILE_NAME.
+
+**Production**
+
+For production, add another volume to the `web` and `nginx` services:
+
+<pre>version: '3.8'
+
+services:
+  web:
+    build:
+      context: ./app
+      dockerfile: Dockerfile.prod
+    command: gunicorn hello_django.wsgi:application --bind 0.0.0.0:8000
+    volumes:
+      - static_volume:/home/app/web/staticfiles
+      - media_volume:/home/app/web/mediafiles
+    expose:
+      - 8000
+    env_file:
+      - ./.env.prod
+    depends_on:
+      - db
+  db:
+    image: postgres:15
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    env_file:
+      - ./.env.prod.db
+  nginx:
+    build: ./nginx
+    volumes:
+      - static_volume:/home/app/web/staticfiles
+      - media_volume:/home/app/web/mediafiles
+    ports:
+      - 1337:80
+    depends_on:
+      - web
+
+volumes:
+  postgres_data:
+  static_volume:
+  media_volume:</pre>
+
+Create the "/home/app/web/mediafiles" folder in `Dockerfile.prod`:
+
+<pre>...
+
+# create the appropriate directories
+ENV HOME=/home/app
+ENV APP_HOME=/home/app/web
+RUN mkdir $APP_HOME
+RUN mkdir $APP_HOME/staticfiles
+RUN mkdir $APP_HOME/mediafiles
+WORKDIR $APP_HOME
+
+...</pre>
+
+Update the Nginx config again:
+
+<pre>upstream hello_django {
+    server web:8000;
+}
+
+server {
+
+    listen 80;
+
+    location / {
+        proxy_pass http://hello_django;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Host $host;
+        proxy_redirect off;
+    }
+
+    location /static/ {
+        alias /home/app/web/staticfiles/;
+    }
+
+    location /media/ {
+        alias /home/app/web/mediafiles/;
+    }
+
+}</pre>
+
+Add the following to *settings.py*:
+
+<pre>CSRF_TRUSTED_ORIGINS = ["http://localhost:1337"]</pre>
+
+Re-build:
+
+<pre>$ docker-compose down -v
+
+$ docker-compose -f docker-compose.prod.yml up -d --build
+$ docker-compose -f docker-compose.prod.yml exec web python manage.py migrate --noinput
+$ docker-compose -f docker-compose.prod.yml exec web python manage.py collectstatic --no-input --clear</pre>
+
+Test it out one final time:
+
+1. Upload an image at http://localhost:1337/.
+2. Then, view the image at http://localhost:1337/media/IMAGE_FILE_NAME.
+
+If you see an `413 Request Entity Too Large` error, you'll need to [increase the maximum allowed size of the client request body](https://stackoverflow.com/a/28476755/1799408) in either the server or location context within the Nginx config. Example:
+
+<pre>location / {
+    proxy_pass http://hello_django;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header Host $host;
+    proxy_redirect off;
+    client_max_body_size 100M;
+}</pre>
+
+Example:
